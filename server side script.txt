@@ -1,0 +1,169 @@
+import org.forgerock.http.protocol.*
+import org.forgerock.util.promise.*
+  
+logger.message("password: "+sharedState.get("javax.security.auth.login.password"))
+Request request = new Request()
+request.method = 'POST'
+request.uri = new URI('http://host:port/openam/json/scripting/authenticate')
+request.getHeaders().add('x-openam-username', username)
+request.getHeaders().add('x-openam-password', sharedState.get("javax.security.auth.login.password"))
+
+Promise promise = httpClient.send(request)
+Response response = promise.get();
+logger.message("status1: " + response.getStatus())
+String entity = response.getEntity()
+logger.message("entity1: " + entity)
+
+groovy.json.JsonSlurper slurper = new groovy.json.JsonSlurper()
+result = slurper.parseText(entity)
+String tokenId = result.tokenId
+//def values = authId.tokenize( '.' )
+logger.message("parsed tokenId: "+tokenId);
+
+request = new Request()
+request.method = 'GET'
+request.uri = new URI('http://host:port/openam/json/users/' + username)
+request.getHeaders().add('Content-Type','application/json');
+request.getHeaders().add('iPlanetDirectoryPro',tokenId);
+promise = httpClient.send(request)
+response = promise.get();
+logger.message("status2: " + response.getStatus())
+entity = response.getEntity()
+logger.message("entity2: " + entity)
+// parse the user profile data
+slurper = new groovy.json.JsonSlurper()
+result = slurper.parseText(entity)
+
+// Evaluate policy
+request = new Request()
+request.method = 'POST'
+request.uri = new URI('http://host:port/openam/json/policies?_action=evaluate')
+request.getHeaders().add('Content-Type','application/json');
+request.getHeaders().add('iPlanetDirectoryPro',tokenId);
+request.setEntity("{\"resources\": [\"authn/view\", \"authn/self\"],\"application\":\"AuthnPolicySet_a\", \"subject\": {\"ssoToken\":\"" +tokenId+"\"}}")
+promise = httpClient.send(request)
+response = promise.get();
+logger.message("status3: " + response.getStatus())
+entity = response.getEntity()
+logger.message("entity3: " + entity)
+// parse the policy result
+slurper = new groovy.json.JsonSlurper()
+result = slurper.parseText(entity)
+logger.message("parsed policy resource:"+result.resource[0]+" - "+result.resource[1]);
+logger.message("parsed policy actions:"+result.actions[0].view+" - " + result.actions[1].view);
+
+
+if(result.actions[0].view==true && result.actions[1].view == true) {
+  logger.message("AuthN Success!")
+  authState = SUCCESS
+} else {
+  logger.message("AuthN Failed!")
+  authState = FAILED
+}
+
+// /sessions/?_action=logout
+request = new Request()
+request.method = 'POST'
+request.uri = new URI('http://host:port/openam/json/scripting/sessions/?_action=logout')
+request.getHeaders().add('Content-Type','application/json');
+request.getHeaders().add('iPlanetDirectoryPro',tokenId);
+promise = httpClient.send(request)
+response = promise.get();
+logger.message("status4: " + response.getStatus())
+entity = response.getEntity()
+logger.message("entity4: " + entity)
+
+—
+
+logger.message("Starting authentication javascript");
+logger.message("User: " + username);
+
+
+// Log out current cookies in the request
+if (logger.messageEnabled()) {
+  var cookies = requestData.getHeaders('Cookie');
+  for (cookie in cookies) {
+    logger.message('Cookie: ' + cookies[cookie]);
+  }
+}
+
+if (username) {
+  var response = httpClient.post(“http://host:port/openam/json/scripting/authenticate", 
+   "",
+   {cookies : [],
+    headers : [
+      {
+        "field": "Content-type",
+        "value": "application/json"
+      }
+    ]
+    }
+  );
+    // this should contain the JSON and the tokenId we need. But we have to parse it
+  logger.message("Admin1 REST Call. Status: " + response.getStatusCode() + ", Body: " + response.getEntity());
+  var body = response.getEntity();
+  var entity = JSON.parse(body);
+  var authId = entity.authId;
+  authId = JSON.stringify(authId);
+  logger.message("authId received: " +authId);
+  
+  var response = httpClient.post(
+    "http://host:port/openam/json/scripting/authenticate"
+    ,            
+    '{"authId": "xx",      "template": "",      "stage": "DataStore1",      "callbacks": [          {              "type": "NameCallback",              "output": [                  {                      "name": "prompt",                      "value": "User Name:"                  }              ],              "input": [                  {                      "name": "IDToken1",                      "value": "user.1"                  }              ]          },          {              "type": "PasswordCallback",              "output": [                  {                      "name": "prompt",                      "value": "Password:"                  }              ],              "input": [                  {                      "name": "IDToken2",                      "value": "password"                  }              ]          }      ]    }'
+    ,
+    {
+        cookies:[
+        ],
+        headers:[
+            {
+                "field": "Content-Type",
+                "value": "application/json"
+            },
+          	{
+                "field": "Accept",
+                "value": "application/json"
+            }
+        ]
+});
+
+  // this should contain the JSON and the tokenId we need. But we have to parse it
+  logger.message("Admin2 REST Call. Status: " + response.getStatusCode() + ", Body: " + response.getEntity());
+  body = response.getEntity();
+  entity = JSON.parse(body);
+  var cookieValue = entity.tokenId;
+  cookieValue = JSON.stringify(cookieValue);
+    
+  // Fetch user information via REST
+  	var response = httpClient.get("http://host:port/openam/json/users/" + username,
+	{
+    cookies:[
+        {
+            "domain": ".amazonaws.com"
+           
+        }
+    ],
+    headers:[
+        {
+            "field": "Content-type",
+            "value": "application/json"
+        },
+        {
+           "field": "iPlanetDirectoryPro",
+           "value": cookieValue
+        }
+    ]
+	});
+  // Log out response from REST call
+  logger.message("User REST Call. Status: " + response.getStatusCode() + ", Body: " + response.getEntity());
+}
+
+var now = new Date();
+logger.message("Current time: " + now.getHours());
+if (now.getHours() < START_TIME || now.getHours() > END_TIME) {
+  logger.error("Login forbidden outside work hours!");
+  authState = FAILED;
+} else {
+  logger.message("Authentication allowed!");
+  authState = SUCCESS;
+}
